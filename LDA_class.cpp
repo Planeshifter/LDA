@@ -62,6 +62,7 @@ NumericMatrix getTDM(int W, int D, List w_num);
 
 cpp_dec_float_100 PhiDensity(arma::mat phi);
 cpp_dec_float_100 ProposalDensity(arma::mat phi);
+cpp_dec_float_100 ArrayMax(cpp_dec_float_100 array[], int numElements);
 
 double rgamma_cpp(double alpha);
 
@@ -527,7 +528,7 @@ cpp_dec_float_100 LDA::PhiDensity(arma::mat phi)
        sumLik_vec[k] = dot(logPhi_k,nd);
        sumLik += sumLik_vec[k];
        }
-     cpp_dec_float_100 b = ArrayMax(sumLik_vec);
+     cpp_dec_float_100 b = ArrayMax(sumLik_vec,K);
      logLikelihood_vec[d] = exp(sumLik + b);
      Rcout << logLikelihood_vec[d] << " - ";
      Rcout << "b:" << b << " - ";
@@ -600,12 +601,11 @@ double LDA::PhiDensity2(NumericMatrix phi)
    }
 
 
-cpp_dec_float_100 ArrayMax(cpp_dec_float_100 array[])
+cpp_dec_float_100 LDA::ArrayMax(cpp_dec_float_100 array[], int numElements)
 {
-     int length = array.size( );  // establish size of array
      cpp_dec_float_100 max = array[0];       // start with max = first element
 
-     for(int i = 1; i<length; i++)
+     for(int i = 1; i<numElements; i++)
      {
           if(array[i] > max)
                 max = array[i];
