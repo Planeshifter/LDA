@@ -6,12 +6,24 @@
 
 library(ggplot2)
 
-plotChangingZ(LDA)
+plotChangingZ <- function(LDA)
 	{
+    require(ggplot2)
     nonchangingZ <- vector()
-	phi <- LDA$getPhiList()	
-	for (i in 2:length(phi))
+	z <- LDA$getZList()	
+	len <- length(z)-1
+	for (i in 1:len)
 		{
-		nonchangingZ <- sum(phi[i]=phi[i-1])	
+		current = z[[i+1]]
+		old = z[[i]]
+		sum_d = 0;
+		for (d in 1:LDA$D)
+		{
+		sum_d = sum_d + sum(!current[[d]]==old[[d]])
+		}	
+		nonchangingZ[i] = sum_d
 		}
+	df1 = data.frame(iter=1:len, changingz = nonchangingZ)
+	ggplot(df1,aes(x=iter,y=changingz))+geom_line()+labs(x="Iteration",y="Number of z that switched labels")+
+			theme_bw()
 	}

@@ -47,9 +47,12 @@ rowvec rDirichlet(double alpha, int length);
 mat DrawFromProposal();
 List getPhiList();
 List getZList();
+double PhiDensity2(NumericMatrix phi);
+NumericMatrix PhiGradient(NumericMatrix phi, int z);
 
 private:
 vector< vector<int> > CreateIntMatrix(List input);
+vector<cpp_dec_float_100> phiProd; 
 
 NumericMatrix get_phis();
 NumericMatrix get_thetas();
@@ -116,7 +119,7 @@ List LDA::getZList()
 int length = z_list.size();
 List ret(length);
 
-for (int i = 0; i<iter; i++)
+for (int i = 0; i<length; i++)
   {
   ret[i] = wrap(z_list[i]);
   }
@@ -451,6 +454,48 @@ void LDA::NichollsMH(int iter, int burnin, int thin)
     }
 
   }
+  
+  
+NumericMatrix LDA::PhiGradient(NumericMatrix phi, int z)
+  {
+    arma::mat phi2 = as<arma::mat>(phi);
+    arma::mat logPhi = log(phi2);
+    double logPhiProd[K];
+    double PhiProd[K];
+    double dSum = 0; 
+    arma::mat gradient(K,W);
+    
+    for (int z=0;z<K;z++)
+    {
+      for(int w=0;w<W;w++)
+      {
+        
+      for (int d = 0; d<D;d++)
+      {  
+        double sumLik = 0;
+        double nwd = n_wd(w,d);
+        arma::colvec nd = n_wd.col(d);
+  
+        for (int k=0; k<K; k++)
+         {
+         arma::rowvec logPhi_k = logPhi.row(k);
+         logPhiProd[k] = dot(logPhi_k,nd);
+         PhiProd[k] = exp(logPhiProd[k]);        
+         sumLik += PhiProd[k];
+         }
+      
+        dSum +=  (nwd / phi2(z,w)) * PhiProd[z] / sumLik;       
+      }
+    
+      gradient(z,w) = dSum + (beta - 1) / phi2(z,w);
+          
+      }
+    }
+       
+    return wrap(gradient);   
+  }  
+  
+  
 
 cpp_dec_float_100 LDA::ProposalDensity(arma::mat phi)
   {
@@ -468,6 +513,7 @@ cpp_dec_float_100 LDA::PhiDensity(arma::mat phi)
   {
   arma::mat logPhi = log(phi);
   cpp_dec_float_100 logLikelihood_vec[D];
+  cpp_dec_float_100 sumLik_vec[K];
   cpp_dec_float_100 logLikelihood = 0;
 
    for (int d=0; d<D; d++)
@@ -478,13 +524,16 @@ cpp_dec_float_100 LDA::PhiDensity(arma::mat phi)
      for (int k=0; k<K; k++)
        {
        arma::rowvec logPhi_k = logPhi.row(k);
-       cpp_dec_float_100 sumLik_k = dot(logPhi_k,nd);
-       sumLik += sumLik_k;
+       sumLik_vec[k] = dot(logPhi_k,nd);
+       sumLik += sumLik_vec[k];
        }
-     logLikelihood_vec[d] = exp(sumLik + log(alpha));
-     logLikelihood += logLikelihood_vec[d];
+     cpp_dec_float_100 b = ArrayMax(sumLik_vec);
+     logLikelihood_vec[d] = exp(sumLik + b);
+     Rcout << logLikelihood_vec[d] << " - ";
+     Rcout << "b:" << b << " - ";
+     logLikelihood += b + log(logLikelihood_vec[d]);
      }
-
+      logLikelihood += D * log(alpha);
       logLikelihood -= D * log(K*alpha);
       //Rcout << "logLikelihood: " << logLikelihood;
 
@@ -503,6 +552,67 @@ cpp_dec_float_100 LDA::PhiDensity(arma::mat phi)
     return Prob;
    }
 
+double LDA::PhiDensity2(NumericMatrix phi)
+  {
+  arma::mat phi2 = as<arma::mat>(phi);
+  arma::mat logPhi = log(phi2);
+  double logLikelihood_vec[D];
+  double logLikelihood = 0;
+
+   for (int d=0; d<D; d++)
+     {
+     double sumLik = 0;
+     arma::colvec nd = n_wd.col(d);
+
+     for (int k=0; k<K; k++)
+       {
+       arma::rowvec logPhi_k = logPhi.row(k);
+       double inProd_k = 0;
+
+       for (int w=0; w<W; w++)
+  	   {
+    	   inProd_k += logPhi_k[w] * nd[w];
+		   }
+       // Rcout << inProd_k;
+       double sumLik_k = exp(inProd_k) * alpha;
+       sumLik += sumLik_k;
+       }
+     logLikelihood_vec[d] = log(sumLik);
+     logLikelihood += logLikelihood_vec[d];
+     }
+
+      logLikelihood -= D * log(K*alpha);
+      //Rcout << "logLikelihood: " << logLikelihood;
+
+      double logBetaFun = K*(lgamma(W*beta)-W*lgamma(beta));
+      //Rcout << "logBetaFun: " << logBetaFun;
+
+      double logPhiSum = 0;
+
+      arma::mat temp = logPhi * (beta-1);
+      logPhiSum = accu(temp);
+
+      //Rcout << "LogPhiSum: " << logPhiSum;
+
+    double logProb = logLikelihood + logBetaFun + logPhiSum;
+    double Prob = exp(logProb);
+    return Prob;
+   }
+
+
+cpp_dec_float_100 ArrayMax(cpp_dec_float_100 array[])
+{
+     int length = array.size( );  // establish size of array
+     cpp_dec_float_100 max = array[0];       // start with max = first element
+
+     for(int i = 1; i<length; i++)
+     {
+          if(array[i] > max)
+                max = array[i];
+     }
+     return max;                // return highest value in array
+}
+
 
 
 RCPP_MODULE(LDA_module) {
@@ -515,6 +625,7 @@ class_<LDA>( "LDA" )
 .field( "nw_sum", &LDA::nw_sum)
 .field("nw",&LDA::nw)
 .field("K", &LDA::K)
+.field("D",&LDA::D)
 .field("phi_avg",&LDA::phi_avg)
 .field("theta_avg",&LDA::theta_avg)
 .method("collapsedGibbs",&LDA::collapsedGibbs)
@@ -524,5 +635,6 @@ class_<LDA>( "LDA" )
 .method("DrawFromProposal",&LDA::DrawFromProposal)
 .method("getPhiList",&LDA::getPhiList)
 .method("getZList",&LDA::getZList)
+.method("PhiGradient",&LDA::PhiGradient)
 ;
 }
