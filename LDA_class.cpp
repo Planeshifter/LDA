@@ -32,7 +32,7 @@ public:
  NumericMatrix nd;
  NumericMatrix nw;
  NumericMatrix phi_avg;
- NumericMatrix PhiProdMat;
+ arma::mat PhiProdMat;
  arma::mat n_wd;
  vector< vector < vector<int> > > z_list;
  vector< NumericMatrix > phi_list;
@@ -41,12 +41,16 @@ public:
  CharacterVector Vocabulary; // vector storing all (unique) words of vocabulary
  double alpha; // hyper-parameter for Dirichlet prior on theta
  double beta; //  hyper-parameter for Dirichlet prior on phi
+ double sigma; // for Langevin sampler
  boost::mt19937 rng; // seed for random sampling
  List a;
 
 LDA(Reference Obj);
+
 void collapsedGibbs(int iter, int burnin, int thin);
 void NichollsMH(int iter, int burnin, int thin);
+void LangevinMHSampling(int iter, int burnin, int thin);
+
 NumericVector DocTopics(int d, int k);
 NumericMatrix Topics(int k);
 CharacterVector TopicTerms(int k, int no);
@@ -54,15 +58,24 @@ CharacterMatrix Terms(int k);
 arma::rowvec rDirichlet(arma::rowvec param, int length);
 arma::rowvec rDirichlet2(arma::rowvec param, int length);
 arma::mat DrawFromProposal(arma::mat phi_current);
-arma::mat DrawFromProposalInit();
+arma::mat InitPhiMat();
 List getPhiList();
 List getZList();
+
 double PhiDensity2(NumericMatrix phi);
-NumericMatrix PhiGradient(NumericMatrix phi);
+double PhiDensity(arma::mat phi);
+
+arma::mat getPhiGradient(arma::mat phi);
+
 double rgamma_cpp(double alpha);
 double rbeta_cpp(double shape1, double shape2);
+double rnorm_cpp(double mean, double sd);
+
 double LogPhiProd(arma::mat phi); 
 vector<double> LogPhiProd_vec(arma::mat phi);
+arma::mat DrawLangevinProposal(arma::mat phi_current);
+double EvalLangevinProposal(arma::mat PhiFrom, arma::mat PhiTo);
+arma::mat ProjectProposalToSimplex(arma::mat PhiProposal);
 
 private:
 vector< vector<int> > CreateIntMatrix(List input);
@@ -74,7 +87,6 @@ NumericMatrix MatrixToR(NumericMatrix input);
 NumericMatrix avgMatrix(NumericMatrix A, NumericMatrix B, int weight);
 NumericMatrix getTDM(int W, int D, List w_num);
 
-double PhiDensity(arma::mat phi);
 double ProposalDensity(arma::mat phi);
 double ArrayMax(double array[], int numElements);
 double ArrayMin(double array[], int numElements);
@@ -95,6 +107,7 @@ nd = as<NumericMatrix> (Obj.field("nd"));
 
 alpha = Obj.field("alpha");
 beta = Obj.field("beta");
+sigma = 0.00001;
 
 Vocabulary = Obj.field("Vocabulary");
 
@@ -412,6 +425,14 @@ double LDA::rgamma_cpp(double alpha)
     boost::variate_generator<boost::mt19937&,boost::gamma_distribution<> > ret_gamma( rng, dgamma);
     return ret_gamma();
   }
+  
+double LDA::rnorm_cpp(double mean, double sd)
+  {
+  boost::normal_distribution<> nd(mean, sd);
+  boost::variate_generator<boost::mt19937&, 
+                           boost::normal_distribution<> > ret_norm(rng, nd);
+  return ret_norm();  
+  }
 
 arma::rowvec LDA::rDirichlet(arma::rowvec param, int length)
   {
@@ -462,19 +483,16 @@ mat LDA::DrawFromProposal(arma::mat phi_current)
     return phi_sampled;
     }
     
-mat LDA::DrawFromProposalInit()
+mat LDA::InitPhiMat()
     {
     arma::mat phi(K,W);
-    arma::rowvec beta_vec(W);
-    
-    for (int w=0; w<W; w++)
+  
+    for (int k=0; k<K; k++)
       {
-      beta_vec[w] = beta;  
-      }
-       
-    for (int k=0;k<K;k++)
-      { 
-      phi.row(k) = rDirichlet(beta_vec, W);
+        for (int w=0; w<W; w++)
+        {
+        phi(k,w) = beta / (W*beta);  
+        }
       }
     return phi;
     }    
@@ -483,7 +501,7 @@ mat LDA::DrawFromProposalInit()
 void LDA::NichollsMH(int iter, int burnin, int thin)
   {
 
-    arma::mat phi_current = DrawFromProposalInit();
+    arma::mat phi_current = InitPhiMat();
     
     for (int t=1;t<iter;t++)
     {
@@ -558,6 +576,7 @@ vector<double> LDA::LogPhiProd_vec(arma::mat phi)
   {   
   vector<double> ret_vec;
   arma::mat logPhi = log(phi);
+  arma::mat PhiProdMat_Pointer(K,D);
   double sumLik_vec[K];
     
     for (int d=0; d<D; d++)
@@ -569,7 +588,7 @@ vector<double> LDA::LogPhiProd_vec(arma::mat phi)
        {
        arma::rowvec logPhi_k = logPhi.row(k);
        sumLik_vec[k] = dot(logPhi_k,nd);    
-       PhiProdMat(k,d) = sumLik_vec[k];
+       PhiProdMat_Pointer(k,d) = sumLik_vec[k];
        }
      double b = ArrayMax(sumLik_vec,K);
      
@@ -581,16 +600,55 @@ vector<double> LDA::LogPhiProd_vec(arma::mat phi)
      double ret_vec_d = b + log(sumLik);
      ret_vec.push_back(ret_vec_d);
      }  
+  PhiProdMat = PhiProdMat_Pointer;
   return ret_vec;  
   }
-    
   
-  
-NumericMatrix LDA::PhiGradient(NumericMatrix phi)
+// function adapted from Yunmei Chen and Xiaojing Ye (2011)
+
+// [[Rcpp::export]]
+vector<double> ProjectOntoSimplex (vector<double> y)
   {
-    double sumLik_vec[K];
-    arma::mat phi2 = as<arma::mat>(phi);
-    arma::mat logPhi = log(phi2);
+  int m = y.size();
+  bool bget = false;
+
+  vector<double> s = y;
+  std::sort(s.rbegin(), s.rend());
+  
+  double tmpsum = 0;
+  double tmax = 0;
+  
+  for (int i = 0; i<m-1; i++)
+    {
+    tmpsum = tmpsum + s[i];
+    tmax = (tmpsum - 1)/(i+1);
+    if (tmax >= s[i+1]) 
+      {
+      bget = true;
+      break;
+      }
+    }
+    
+   if (bget==false) 
+     {
+     tmax = (tmpsum + s[m-1] - 1)/m;
+     }
+
+   vector<double> x;
+   for (int j = 0; j<m;j++)
+     {
+     double elem1 = y[j] - tmax;
+     double ret = max(elem1,0.0);
+     x.push_back(ret);
+     }
+   
+   return x;    
+   }
+     
+arma::mat LDA::getPhiGradient(arma::mat phi)
+  {
+    arma::mat phi2 = phi;
+    arma::mat logPhi = log(phi);
     vector<double> denom_vec = LogPhiProd_vec(phi2);
     arma::mat gradient(K,W);
     
@@ -612,13 +670,13 @@ NumericMatrix LDA::PhiGradient(NumericMatrix phi)
             arma::rowvec logPhi_k = logPhi.row(z);        
           
             double dotProd = PhiProdMat(z,d);
-            Rcout << "dotProd:" << dotProd;
+            // Rcout << "dotProd:" << dotProd;
             // Rcout << "Dot Product: " << dotProd;
             
             double Numerator = log(nwd) + (nwd - 1)*logPhi(z,w) + dotProd - nd[w]*logPhi_k[w]; 
-            Rcout << Numerator;
+            // Rcout << Numerator;
             double Denominator = denom_vec[d];
-            Rcout << Denominator;
+            // Rcout << Denominator;
             dSum += exp(Numerator - Denominator);
             }
           }
@@ -628,10 +686,108 @@ NumericMatrix LDA::PhiGradient(NumericMatrix phi)
         }
       }
        
-    return wrap(gradient);   
+    return gradient;   
   }  
   
+
+arma::mat LDA::DrawLangevinProposal(arma::mat phi_current)  
+  {
+  arma::mat PhiProposal(K,W);
+  arma::mat PhiGradient = getPhiGradient(phi_current);
+  for (int z=0; z<K; z++)
+    {
+    vector<double> prop_vec; 
+    for (int w=0; w<W; w++)
+      { 
+      double error = rnorm_cpp(0,sigma);
+      double sigma_squared = pow(sigma,2);
+      PhiProposal(z,w) = phi_current(z,w) + 0.5 * sigma_squared * PhiGradient(z,w) + error;
+      }
+    }   
+  return PhiProposal;
+  }
   
+double LDA::EvalLangevinProposal(arma::mat PhiFrom, arma::mat PhiTo)  
+  {
+  double sigma_squared = pow(sigma,2);
+  double logDensity = 0;
+  arma::mat PhiGradient = getPhiGradient(PhiFrom);
+  for (int z=0; z<K; z++)
+    {
+    for (int w=0;w<W;w++)
+      {
+       double gradient_zw = PhiGradient(z,w);
+       double mean = PhiFrom(z,w) + 0.5 * sigma_squared * gradient_zw;
+       double PhiMeanDiff = PhiTo(z,w) - mean; 
+       logDensity -= (1/(2*sigma_squared))*pow(PhiMeanDiff,2);
+      }
+    }   
+  return logDensity;
+  }  
+  
+arma::mat LDA::ProjectProposalToSimplex(arma::mat PhiProposal)
+  {
+    for (int z=0; z<K; z++)
+    {
+    vector<double> prop_vec = conv_to<vector<double> >::from(PhiProposal.row(z));
+    vector<double> Phi_proj_vec = ProjectOntoSimplex(prop_vec);
+    PhiProposal.row(z) = conv_to<rowvec>::from(Phi_proj_vec); 
+    }
+  return PhiProposal;
+  }
+  
+void LDA::LangevinMHSampling(int iter, int burnin, int thin)
+  {
+    arma::mat phi_current = InitPhiMat();
+    arma::mat phi_current_projected = ProjectProposalToSimplex(phi_current);
+    
+    for (int t=1;t<iter;t++)
+    {
+
+    // Metropolis Algorithm:
+    // 1. draw from Langevin proposal density:
+    arma::mat phi_new = DrawLangevinProposal(phi_current_projected);
+    arma::mat phi_new_projected = ProjectProposalToSimplex(phi_new);
+
+    // 2. Calculate acceptance probability
+    double pi_new = PhiDensity(phi_new_projected);
+    double pi_old = PhiDensity(phi_current_projected);
+    double q_num = EvalLangevinProposal(phi_new_projected,phi_current);
+    double q_denom = EvalLangevinProposal(phi_current_projected,phi_new);
+   
+    // Rcout << "Pi_new:" << pi_new;
+    // Rcout << "Pi_old:" << pi_old;
+    // Rcout << "Q_numerator:" << q_num;
+    // Rcout << "Q_denominator:" << q_denom;
+    
+    double acceptanceMH = exp(pi_new + q_num - pi_old - q_denom);
+    double alphaMH = min((double)1,acceptanceMH);
+    // Rcout << "Acceptance Prob:" << alphaMH;
+
+    // draw U[0,1] random variable
+    double u  = rand() / double(RAND_MAX);
+    if (u<=alphaMH) 
+      {
+      phi_current = phi_new;
+      phi_current_projected = phi_new_projected;
+      }
+    else 
+      {
+      phi_current = phi_current;
+      phi_current_projected = phi_current_projected;
+      }
+
+    if (t % thin == 0 && t > burnin) {
+     NumericMatrix phi_add = wrap(phi_current_projected);
+     phi_list.push_back(phi_add);
+      if(phi_list.size()==1) phi_avg = phi_add;
+              else phi_avg =  avgMatrix(phi_avg, phi_add, phi_list.size());
+    };
+
+    }
+
+  }
+    
 
 double LDA::ProposalDensity(arma::mat phi)
   {
@@ -661,7 +817,6 @@ double LDA::ProposalDensity(arma::mat phi)
 double LDA::PhiDensity(arma::mat phi)
   {
   arma::mat logPhi = log(phi);
-  double logLikelihood_vec[D];
   double sumLik_vec[K];
   double logLikelihood = 0;
 
@@ -674,12 +829,15 @@ double LDA::PhiDensity(arma::mat phi)
        {
        arma::rowvec logPhi_k = logPhi.row(k);
        sumLik_vec[k] = dot(logPhi_k,nd);
-       sumLik += sumLik_vec[k];
        }
      double b = ArrayMax(sumLik_vec,K);
-     logLikelihood_vec[d] = exp(sumLik + b);
-     // logLikelihood += b + log(logLikelihood_vec[d]);
-     logLikelihood += b;
+     
+     for (int k=0; k<K; k++)
+       {
+       sumLik += exp(sumLik_vec[k]-b);
+       }
+     
+     logLikelihood +=  b + log(sumLik);
      }
      
       logLikelihood += D * log(alpha);
@@ -794,11 +952,15 @@ class_<LDA>( "LDA" )
 .method("DrawFromProposal",&LDA::DrawFromProposal)
 .method("getPhiList",&LDA::getPhiList)
 .method("getZList",&LDA::getZList)
-.method("PhiGradient",&LDA::PhiGradient)
+.method("getPhiGradient",&LDA::getPhiGradient)
 .method("rgamma_cpp",&LDA::rgamma_cpp)
 .method("rbeta_cpp",&LDA::rbeta_cpp)
-.method("DrawFromProposalInit",&LDA::DrawFromProposalInit)
+.method("InitPhiMat",&LDA::InitPhiMat)
 .method("rDirichlet2",&LDA::rDirichlet2)
 .method("LogPhiProd_vec",&LDA::LogPhiProd_vec)
+.method("DrawLangevinProposal",&LDA::DrawLangevinProposal)
+.method("LangevinMHSampling",&LDA::LangevinMHSampling)
+.method("PhiDensity",&LDA::PhiDensity)
+.method("ProjectProposalToSimplex",&LDA::ProjectProposalToSimplex)
 ;
 }

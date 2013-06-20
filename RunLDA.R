@@ -13,3 +13,4 @@ my_corpus_very_small <- my_corpus_small[1:25]
 temp <- myLDA(my_corpus_very_small,K=4,alpha=1)
 temp$collapsedGibbs(100,0,1)
 temp$NichollsMH(100,0,1)
+temp$LangevinMHSampling(100,0,1)
