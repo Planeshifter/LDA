@@ -32,6 +32,7 @@ public:
  NumericMatrix nd;
  NumericMatrix nw;
  NumericMatrix phi_avg;
+ NumericMatrix PhiProdMat;
  arma::mat n_wd;
  vector< vector < vector<int> > > z_list;
  vector< NumericMatrix > phi_list;
@@ -41,7 +42,6 @@ public:
  double alpha; // hyper-parameter for Dirichlet prior on theta
  double beta; //  hyper-parameter for Dirichlet prior on phi
  boost::mt19937 rng; // seed for random sampling
- vector<double> PhiProd_vec;
  List a;
 
 LDA(Reference Obj);
@@ -555,7 +555,7 @@ double LDA::LogPhiProd(arma::mat phi)
   }
   
 vector<double> LDA::LogPhiProd_vec(arma::mat phi)
-  {
+  {   
   vector<double> ret_vec;
   arma::mat logPhi = log(phi);
   double sumLik_vec[K];
@@ -568,8 +568,8 @@ vector<double> LDA::LogPhiProd_vec(arma::mat phi)
      for (int k=0; k<K; k++)
        {
        arma::rowvec logPhi_k = logPhi.row(k);
-       sumLik_vec[k] = dot(logPhi_k,nd);
-       PhiProd_vec.push_back(sumLik_vec[k]);
+       sumLik_vec[k] = dot(logPhi_k,nd);    
+       PhiProdMat(k,d) = sumLik_vec[k];
        }
      double b = ArrayMax(sumLik_vec,K);
      
@@ -581,7 +581,6 @@ vector<double> LDA::LogPhiProd_vec(arma::mat phi)
      double ret_vec_d = b + log(sumLik);
      ret_vec.push_back(ret_vec_d);
      }  
-     
   return ret_vec;  
   }
     
@@ -599,8 +598,7 @@ NumericMatrix LDA::PhiGradient(NumericMatrix phi)
       {
       for(int w=0;w<W;w++)
         {
-        double dotProd = PhiProd_vec[z];
-        Rcout << "dotProd:" << dotProd;
+          
         double dSum = 0;  
         
         for (int d = 0; d<D;d++)
@@ -611,8 +609,10 @@ NumericMatrix LDA::PhiGradient(NumericMatrix phi)
             {
             // Rcout << "nwd:" << nwd;
             arma::colvec nd = n_wd.col(d);
-            arma::rowvec logPhi_k = logPhi.row(z);
-            
+            arma::rowvec logPhi_k = logPhi.row(z);        
+          
+            double dotProd = PhiProdMat(z,d);
+            Rcout << "dotProd:" << dotProd;
             // Rcout << "Dot Product: " << dotProd;
             
             double Numerator = log(nwd) + (nwd - 1)*logPhi(z,w) + dotProd - nd[w]*logPhi_k[w]; 
