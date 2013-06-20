@@ -5,11 +5,19 @@
 #include <boost/math/special_functions/gamma.hpp>
 #include <boost/random.hpp>
 #include <boost/random/gamma_distribution.hpp>
+#include <boost/math/distributions.hpp>
+
+#include <numeric>
+#include <algorithm>
+#include <map>
+#include <string>
+#include <iostream>
 
 using namespace Rcpp;
 using namespace arma;
 using namespace std;
 using namespace boost::multiprecision;
+using namespace boost::math;
 
 
 class LDA {
@@ -33,7 +41,7 @@ public:
  double alpha; // hyper-parameter for Dirichlet prior on theta
  double beta; //  hyper-parameter for Dirichlet prior on phi
  boost::mt19937 rng; // seed for random sampling
-
+ vector<double> PhiProd_vec;
  List a;
 
 LDA(Reference Obj);
@@ -43,16 +51,22 @@ NumericVector DocTopics(int d, int k);
 NumericMatrix Topics(int k);
 CharacterVector TopicTerms(int k, int no);
 CharacterMatrix Terms(int k);
-rowvec rDirichlet(double alpha, int length);
-mat DrawFromProposal();
+arma::rowvec rDirichlet(arma::rowvec param, int length);
+arma::rowvec rDirichlet2(arma::rowvec param, int length);
+arma::mat DrawFromProposal(arma::mat phi_current);
+arma::mat DrawFromProposalInit();
 List getPhiList();
 List getZList();
 double PhiDensity2(NumericMatrix phi);
-NumericMatrix PhiGradient(NumericMatrix phi, int z);
+NumericMatrix PhiGradient(NumericMatrix phi);
+double rgamma_cpp(double alpha);
+double rbeta_cpp(double shape1, double shape2);
+double LogPhiProd(arma::mat phi); 
+vector<double> LogPhiProd_vec(arma::mat phi);
 
 private:
 vector< vector<int> > CreateIntMatrix(List input);
-vector<cpp_dec_float_100> phiProd; 
+
 
 NumericMatrix get_phis();
 NumericMatrix get_thetas();
@@ -60,11 +74,10 @@ NumericMatrix MatrixToR(NumericMatrix input);
 NumericMatrix avgMatrix(NumericMatrix A, NumericMatrix B, int weight);
 NumericMatrix getTDM(int W, int D, List w_num);
 
-cpp_dec_float_100 PhiDensity(arma::mat phi);
-cpp_dec_float_100 ProposalDensity(arma::mat phi);
-cpp_dec_float_100 ArrayMax(cpp_dec_float_100 array[], int numElements);
-
-double rgamma_cpp(double alpha);
+double PhiDensity(arma::mat phi);
+double ProposalDensity(arma::mat phi);
+double ArrayMax(double array[], int numElements);
+double ArrayMin(double array[], int numElements);
 
 
 
@@ -200,7 +213,7 @@ CharacterVector LDA::TopicTerms(int k, int no)
 
   }
 
-CharacterMatrix  LDA::Terms(int k)
+CharacterMatrix LDA::Terms(int k)
   {
   CharacterMatrix ret(K,k);
   for (int i = 0; i < K; i++)
@@ -385,6 +398,14 @@ NumericMatrix LDA::getTDM(int W, int D, List w_num) {
 //    return rdirichlet(K,rep(beta,W));
 //  }
 
+
+double LDA::rbeta_cpp(double shape1, double shape2)
+  {
+    double u  = rand() / double(RAND_MAX);
+    beta_distribution<> beta_dist(shape1, shape2);
+    return quantile(beta_dist, u);  
+  }
+
 double LDA::rgamma_cpp(double alpha)
   {
     boost::gamma_distribution<> dgamma(alpha);
@@ -392,47 +413,95 @@ double LDA::rgamma_cpp(double alpha)
     return ret_gamma();
   }
 
-rowvec LDA::rDirichlet(double alpha, int length)
+arma::rowvec LDA::rDirichlet(arma::rowvec param, int length)
   {
   rowvec ret(length);
   for (int l = 0; l<length; l++)
     {
-    ret[l] = rgamma_cpp(alpha);
+    double beta = param[l];
+    ret[l] = rgamma_cpp(beta);
     }
   ret = ret / sum(ret);
   return ret;
   }
-
-mat LDA::DrawFromProposal()
+  
+arma::rowvec LDA::rDirichlet2(arma::rowvec param, int length)
+  {
+  vector<double> ret;
+  param *= 10000;
+  vector<double> param_vec = conv_to<vector<double> >::from(param);
+  Rcout << param_vec[0] << "-";
+  int len = length - 1;
+  
+  double paramSum = std::accumulate(param_vec.begin()+1,param_vec.end(),(double)0);
+  Rcout << paramSum;
+  ret.push_back(rbeta_cpp(param_vec[0], paramSum));
+  for (int i=1; i<len;i++)
     {
-    mat phi(K,W);
+    double paramSum = std::accumulate(param_vec.begin()+i+1,param_vec.end(),(double)0); 
+    double phi = rbeta_cpp(param_vec[i], paramSum);
+    double sumRet = std::accumulate(ret.begin(),ret.end(),(double)0);  
+    ret.push_back((1-sumRet) * phi);
+    }   
+  double sumRet = std::accumulate(ret.begin(),ret.end(),(double)0); 
+  ret.push_back(1-sumRet);
+  return ret;
+  }  
+  
+
+mat LDA::DrawFromProposal(arma::mat phi_current)
+    {
+    arma::mat phi_sampled(K,W);
     for (int k=0;k<K;k++)
       {
-      phi.row(k) = rDirichlet(alpha,W);
+      arma::rowvec phi_current_row = phi_current.row(k);
+      arma::rowvec new_row = rDirichlet2(phi_current_row, W);
+      // Rcout << new_row;
+      phi_sampled.row(k) = new_row;
+      }
+    return phi_sampled;
+    }
+    
+mat LDA::DrawFromProposalInit()
+    {
+    arma::mat phi(K,W);
+    arma::rowvec beta_vec(W);
+    
+    for (int w=0; w<W; w++)
+      {
+      beta_vec[w] = beta;  
+      }
+       
+    for (int k=0;k<K;k++)
+      { 
+      phi.row(k) = rDirichlet(beta_vec, W);
       }
     return phi;
-    }
-
+    }    
+     
 
 void LDA::NichollsMH(int iter, int burnin, int thin)
   {
 
-    mat phi_current = DrawFromProposal();
+    arma::mat phi_current = DrawFromProposalInit();
+    
     for (int t=1;t<iter;t++)
     {
 
     // Metropolis-Hastings Algorithm:
     // 1. draw from proposal density:
-    mat phi_new = DrawFromProposal();
+    arma::mat hyperParams = beta + 0.1 * (phi_current - beta);
+    arma::mat phi_new = DrawFromProposal(hyperParams);
 
     // 2. Calculate acceptance probability
-    cpp_dec_float_100 pi_new = PhiDensity(phi_new);
-    cpp_dec_float_100 pi_old = PhiDensity(phi_current);
-    cpp_dec_float_100 q_new = ProposalDensity(phi_new);
-    cpp_dec_float_100 q_old = ProposalDensity(phi_current);
+    double pi_new = PhiDensity(phi_new);
+    double pi_old = PhiDensity(phi_current);
+    double q_new = ProposalDensity(phi_new);
+    double q_old = ProposalDensity(phi_current);
 
-    cpp_dec_float_100 acceptanceMH = (pi_new * q_old) / (pi_old * q_new);
-    cpp_dec_float_100 alphaMH = std::min<boost::multiprecision::cpp_dec_float_100>(1,acceptanceMH);
+    double acceptanceMH = exp(pi_new + q_old - pi_old - q_new);
+    double alphaMH = min((double)1,acceptanceMH);
+    Rcout << "Acceptance Prob:" << alphaMH;
 
     // draw U[0,1] random variable
     double u  = rand() / double(RAND_MAX);
@@ -456,70 +525,149 @@ void LDA::NichollsMH(int iter, int burnin, int thin)
 
   }
   
-  
-NumericMatrix LDA::PhiGradient(NumericMatrix phi, int z)
+double LDA::LogPhiProd(arma::mat phi)
   {
+  arma::mat logPhi = log(phi);
+  double sumLik_vec[K];
+  double logPhiProd = 0;
+    
+    for (int d=0; d<D; d++)
+     {
+     double sumLik = 0;
+     arma::colvec nd = n_wd.col(d);
+
+     for (int k=0; k<K; k++)
+       {
+       arma::rowvec logPhi_k = logPhi.row(k);
+       sumLik_vec[k] = dot(logPhi_k,nd);
+       }
+     double b = ArrayMax(sumLik_vec,K);
+     
+     for (int k=0; k<K; k++)
+       {
+       sumLik += exp(sumLik_vec[k]-b);
+       }
+     
+     logPhiProd += b + log(sumLik);
+     }  
+     
+  return logPhiProd;  
+  }
+  
+vector<double> LDA::LogPhiProd_vec(arma::mat phi)
+  {
+  vector<double> ret_vec;
+  arma::mat logPhi = log(phi);
+  double sumLik_vec[K];
+    
+    for (int d=0; d<D; d++)
+     {
+     double sumLik = 0;
+     arma::colvec nd = n_wd.col(d);
+
+     for (int k=0; k<K; k++)
+       {
+       arma::rowvec logPhi_k = logPhi.row(k);
+       sumLik_vec[k] = dot(logPhi_k,nd);
+       PhiProd_vec.push_back(sumLik_vec[k]);
+       }
+     double b = ArrayMax(sumLik_vec,K);
+     
+     for (int k=0; k<K; k++)
+       {
+       sumLik += exp(sumLik_vec[k]-b);
+       }
+     
+     double ret_vec_d = b + log(sumLik);
+     ret_vec.push_back(ret_vec_d);
+     }  
+     
+  return ret_vec;  
+  }
+    
+  
+  
+NumericMatrix LDA::PhiGradient(NumericMatrix phi)
+  {
+    double sumLik_vec[K];
     arma::mat phi2 = as<arma::mat>(phi);
     arma::mat logPhi = log(phi2);
-    double logPhiProd[K];
-    double PhiProd[K];
-    double dSum = 0; 
+    vector<double> denom_vec = LogPhiProd_vec(phi2);
     arma::mat gradient(K,W);
     
     for (int z=0;z<K;z++)
-    {
-      for(int w=0;w<W;w++)
       {
+      for(int w=0;w<W;w++)
+        {
+        double dotProd = PhiProd_vec[z];
+        Rcout << "dotProd:" << dotProd;
+        double dSum = 0;  
         
-      for (int d = 0; d<D;d++)
-      {  
-        double sumLik = 0;
-        double nwd = n_wd(w,d);
-        arma::colvec nd = n_wd.col(d);
-  
-        for (int k=0; k<K; k++)
-         {
-         arma::rowvec logPhi_k = logPhi.row(k);
-         logPhiProd[k] = dot(logPhi_k,nd);
-         PhiProd[k] = exp(logPhiProd[k]);        
-         sumLik += PhiProd[k];
-         }
-      
-        dSum +=  (nwd / phi2(z,w)) * PhiProd[z] / sumLik;       
+        for (int d = 0; d<D;d++)
+          {  
+          double nwd = n_wd(w,d);
+          if (nwd==0) dSum += 0;
+          else 
+            {
+            // Rcout << "nwd:" << nwd;
+            arma::colvec nd = n_wd.col(d);
+            arma::rowvec logPhi_k = logPhi.row(z);
+            
+            // Rcout << "Dot Product: " << dotProd;
+            
+            double Numerator = log(nwd) + (nwd - 1)*logPhi(z,w) + dotProd - nd[w]*logPhi_k[w]; 
+            Rcout << Numerator;
+            double Denominator = denom_vec[d];
+            Rcout << Denominator;
+            dSum += exp(Numerator - Denominator);
+            }
+          }
+        // Rcout << "dSum:" << dSum; 
+        gradient(z,w) = dSum + (beta - 1) / phi2(z,w);
+        //Rcout << gradient(z,w);
+        }
       }
-    
-      gradient(z,w) = dSum + (beta - 1) / phi2(z,w);
-          
-      }
-    }
        
     return wrap(gradient);   
   }  
   
   
 
-cpp_dec_float_100 LDA::ProposalDensity(arma::mat phi)
+double LDA::ProposalDensity(arma::mat phi)
   {
-    cpp_dec_float_100 logBetaFun = K*(W*lgamma(beta)-lgamma(W*beta));
+    double logBetaFun = 0;
+    double betaSum = 0;
+    for (int k=0; k<K;k++)
+      {
+      for (int w=0;w<W;w++)
+        {
+        double phi_scalar = phi(k,w);
+        logBetaFun += lgamma(phi_scalar);
+        betaSum  += phi_scalar;
+        }
+          
+      }
+    // double logBetaFun = K*(W*lgamma(beta)-lgamma(W*beta));
+    logBetaFun -= lgamma(betaSum);
+    
     arma::mat logPhi = log(phi);
     arma::mat temp = logPhi * (beta-1);
-    cpp_dec_float_100 logPhiSum = accu(temp);
+    double logPhiSum = accu(temp);
 
-    cpp_dec_float_100 logDensity = logPhiSum - logBetaFun;
-    Rcout << exp(logDensity) << " - ";
-    return exp(logDensity);
+    double logDensity = logPhiSum - logBetaFun;
+    return logDensity;
   }
 
-cpp_dec_float_100 LDA::PhiDensity(arma::mat phi)
+double LDA::PhiDensity(arma::mat phi)
   {
   arma::mat logPhi = log(phi);
-  cpp_dec_float_100 logLikelihood_vec[D];
-  cpp_dec_float_100 sumLik_vec[K];
-  cpp_dec_float_100 logLikelihood = 0;
+  double logLikelihood_vec[D];
+  double sumLik_vec[K];
+  double logLikelihood = 0;
 
    for (int d=0; d<D; d++)
      {
-     cpp_dec_float_100 sumLik = 0;
+     double sumLik = 0;
      arma::colvec nd = n_wd.col(d);
 
      for (int k=0; k<K; k++)
@@ -528,29 +676,28 @@ cpp_dec_float_100 LDA::PhiDensity(arma::mat phi)
        sumLik_vec[k] = dot(logPhi_k,nd);
        sumLik += sumLik_vec[k];
        }
-     cpp_dec_float_100 b = ArrayMax(sumLik_vec,K);
+     double b = ArrayMax(sumLik_vec,K);
      logLikelihood_vec[d] = exp(sumLik + b);
-     Rcout << logLikelihood_vec[d] << " - ";
-     Rcout << "b:" << b << " - ";
-     logLikelihood += b + log(logLikelihood_vec[d]);
+     // logLikelihood += b + log(logLikelihood_vec[d]);
+     logLikelihood += b;
      }
+     
       logLikelihood += D * log(alpha);
       logLikelihood -= D * log(K*alpha);
-      //Rcout << "logLikelihood: " << logLikelihood;
+      // Rcout << "logLikelihood: " << logLikelihood;
 
-      cpp_dec_float_100 logBetaFun = K*(lgamma(W*beta)-W*lgamma(beta));
-      //Rcout << "logBetaFun: " << logBetaFun;
+      double logBetaFun = K*(lgamma(W*beta)-W*lgamma(beta));
+      // Rcout << "logBetaFun: " << logBetaFun;
 
-      cpp_dec_float_100 logPhiSum = 0;
+      double logPhiSum = 0;
 
       arma::mat temp = logPhi * (beta-1);
       logPhiSum = accu(temp);
 
-      //Rcout << "LogPhiSum: " << logPhiSum;
+      // Rcout << "LogPhiSum: " << logPhiSum;
 
-    cpp_dec_float_100 logProb = logLikelihood + logBetaFun + logPhiSum;
-    cpp_dec_float_100 Prob = exp(logProb);
-    return Prob;
+    double logProb = logLikelihood + logBetaFun + logPhiSum;
+    return logProb;
    }
 
 double LDA::PhiDensity2(NumericMatrix phi)
@@ -601,9 +748,9 @@ double LDA::PhiDensity2(NumericMatrix phi)
    }
 
 
-cpp_dec_float_100 LDA::ArrayMax(cpp_dec_float_100 array[], int numElements)
+double LDA::ArrayMax(double array[], int numElements)
 {
-     cpp_dec_float_100 max = array[0];       // start with max = first element
+     double max = array[0];       // start with max = first element
 
      for(int i = 1; i<numElements; i++)
      {
@@ -611,6 +758,18 @@ cpp_dec_float_100 LDA::ArrayMax(cpp_dec_float_100 array[], int numElements)
                 max = array[i];
      }
      return max;                // return highest value in array
+}
+
+double LDA::ArrayMin(double array[], int numElements)
+{
+     double min = array[0];       // start with min = first element
+
+     for(int i = 1; i<numElements; i++)
+     {
+          if(array[i] < min)
+                min = array[i];
+     }
+     return min;                // return smallest value in array
 }
 
 
@@ -636,5 +795,10 @@ class_<LDA>( "LDA" )
 .method("getPhiList",&LDA::getPhiList)
 .method("getZList",&LDA::getZList)
 .method("PhiGradient",&LDA::PhiGradient)
+.method("rgamma_cpp",&LDA::rgamma_cpp)
+.method("rbeta_cpp",&LDA::rbeta_cpp)
+.method("DrawFromProposalInit",&LDA::DrawFromProposalInit)
+.method("rDirichlet2",&LDA::rDirichlet2)
+.method("LogPhiProd_vec",&LDA::LogPhiProd_vec)
 ;
 }
