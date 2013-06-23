@@ -30,10 +30,11 @@ myLDA_class <- setRefClass("myLDA_class",
 				{
 					require(tm)                 
 					.self$corpus <-  tm_map(.self$corpus, tolower)
-					.self$corpus <-  tm_map(.self$corpus, removeWords, words=stopwords())
 					.self$corpus <-  tm_map(.self$corpus, removeNumbers)
 					.self$corpus <-  tm_map(.self$corpus, removePunctuation)
-					# .self$corpus <-  tm_map(.self$corpus, stemDocument)
+					#.self$corpus <-  tm_map(.self$corpus, stemDocument)
+					.self$corpus <-  tm_map(.self$corpus, removeWords, words=stopwords("en"))
+					.self$corpus <-  tm_map(.self$corpus, removeWords, words=stopwords("german"))
 					.self$corpus <-  tm_map(.self$corpus, stripWhitespace)
 				},
 				

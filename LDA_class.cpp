@@ -930,8 +930,6 @@ double LDA::ArrayMin(double array[], int numElements)
      return min;                // return smallest value in array
 }
 
-
-
 RCPP_MODULE(LDA_module) {
 class_<LDA>( "LDA" )
 .constructor<Reference>()
